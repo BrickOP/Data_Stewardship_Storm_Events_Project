@@ -1,0 +1,324 @@
+---
+title: "Exploratory Analysis of U.S. NOAA Storm Events, 2024"
+author: "Nuzaif Naveed"
+date: "2025-05-02"
+output: html_document
+---
+
+## Synopsis
+
+This analysis explores the 2024 NOAA Storm Events database to identify patterns in storm-related fatalities, injuries, event frequencies, seasonal behaviors, and economic damages across the United States. The dataset, obtained from three interlinked files (event details, locations, and fatalities), was merged and cleaned for analysis.
+
+Key findings include: - The most harmful event types to population health - The most common weather event types in each state - Seasonal patterns of storm event occurrences - The types of events with the greatest economic impact
+
+This report is intended for emergency management professionals and analysts who may need to prioritize resources based on the type, location, and impact of severe weather events.
+
+## Data Processing
+
+The raw data files were read from NOAA's Storm Events archive, joined by `EVENT_ID`, and cleaned to address missing values and standardize variables. Below is the code for data loading, merging, missingness visualization, and preprocessing.
+
+```{r load-and-clean, message=FALSE, warning=FALSE}
+# Clear the workspace — removes all existing variables to prevent conflicts
+rm(list = ls())
+
+# Load required packages
+# dplyr: data manipulation
+# readr: efficient CSV reading
+# naniar: missing data visualization
+# ggplot2: plotting
+# scales: formatting numeric outputs (e.g., currency)
+library(dplyr)
+library(readr)
+library(naniar)
+library(ggplot2)
+library(scales)
+
+# Set the folder path where your unzipped data files are stored
+# Update this path if your files are saved in a different location
+folder_path <- "D:/MS Data Analytics/Fall 2024/DAT 511/Final Project/Data_Stewardship_Storm_Events_Project"
+
+# Define file paths for the three NOAA data files: details, fatalities, locations
+details_file <- file.path(folder_path, "data", "StormEvents_details-ftp_v1.0_d2024_c20250401.csv.gz")
+fatalities_file <- file.path(folder_path, "data", "StormEvents_fatalities-ftp_v1.0_d2024_c20250401.csv.gz")
+locations_file <- file.path(folder_path, "data", "StormEvents_locations-ftp_v1.0_d2024_c20250401.csv.gz")
+
+# Read the CSV files directly from compressed .gz format
+details <- read_csv(details_file)
+fatalities <- read_csv(fatalities_file)
+locations <- read_csv(locations_file)
+
+# Merge the three datasets using the common key: EVENT_ID
+# - Each EVENT_ID represents one storm event
+# - 'details' is the base file; we enrich it by joining with 'locations' and then 'fatalities'
+joined_data <- details %>%
+  left_join(locations, by = "EVENT_ID") %>%
+  left_join(fatalities, by = "EVENT_ID")
+
+# Save the joined dataset to a local CSV file (optional, for inspection outside R)
+output_file <- file.path(folder_path, "StormEvents_joined_data.csv")
+write_csv(joined_data, output_file)
+
+# View the first few rows to confirm successful loading and joining
+print(head(joined_data))
+
+# View a summary of column names, data types, and sample values
+glimpse(joined_data)
+```
+
+```{r vis-miss-plot, fig.width=14, fig.height=8}
+# Sample 5,000 rows for plotting
+set.seed(786)
+sample_data <- joined_data %>% sample_n(5000)
+
+# Calculate % missing values in each column
+missing_prop <- colMeans(is.na(sample_data))
+
+# Highlight variables with >80% missing
+missing_prop <- colMeans(is.na(sample_data))
+highlight_vars <- names(missing_prop[missing_prop > 0.8])
+```
+
+```{r missingness-map-bar, fig.width=16, fig.height=20, message=FALSE, warning=FALSE}
+library(patchwork)
+
+# Plot 1: Visual missingness heatmap
+plot1 <- vis_miss(sample_data) +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    vjust = 0.5,
+    hjust = 1,
+    color = ifelse(names(sample_data) %in% highlight_vars, "red", "black"),
+    face = ifelse(names(sample_data) %in% highlight_vars, "bold", "plain")
+  )) +
+  labs(title = "Visual Map of Missing Data")
+
+# Plot 2: Bar chart of missing values
+plot2 <- gg_miss_var(sample_data) +
+  labs(title = "Missingness by Variable")
+
+# Combine the two vertically
+plot1 / plot2 +
+  plot_annotation(title = "Missing Data Overview: Heatmap + Bar Chart")
+```
+
+```{r co-missingness-upset, fig.width=14, fig.height=8}
+gg_miss_upset(sample_data, nsets = 10)
+```
+
+```{r}
+# Compute missingness percentage across the full dataset
+missing_summary <- colSums(is.na(joined_data)) / nrow(joined_data) * 100
+
+# Sort to view highest missingness first
+missing_summary <- sort(missing_summary, decreasing = TRUE)
+print(missing_summary)
+```
+
+
+
+```{r}
+# Identify columns with more than 90% missing data
+# These columns are typically not useful for analysis and clutter the dataset
+cols_to_drop <- names(missing_summary[missing_summary > 90])
+
+# Drop high-missingness columns from dataset
+joined_data_cleaned <- joined_data %>%
+  select(-all_of(cols_to_drop))
+
+# Display which columns were dropped for transparency
+cat("Dropped columns with >90% missingness:\n")
+print(cols_to_drop)
+```
+
+## Results
+
+Below are the analyses to address the key research questions.
+
+### Question 1: Across the United States, which types of events (as indicated in the EVENT_TYPE variable) are most harmful with respect to population health?
+
+```{r q1-harmful-events, fig.width=12, fig.height=7}
+# Select key columns related to fatalities and injuries.
+health_data <- joined_data_cleaned %>%
+  select(EVENT_ID, EVENT_TYPE, STATE, DEATHS_DIRECT, DEATHS_INDIRECT, INJURIES_DIRECT, INJURIES_INDIRECT)
+
+# Convert state names to uppercase (for standardization) and filter for US states.
+us_states <- c(state.name, "District of Columbia") %>% toupper()
+health_data <- health_data %>%
+  filter(STATE %in% us_states)
+
+# Calculate total harm by summing deaths and injuries.
+health_data <- health_data %>%
+  mutate(TOTAL_HARM = DEATHS_DIRECT + DEATHS_INDIRECT + INJURIES_DIRECT + INJURIES_INDIRECT)
+
+# Group data by event type and compute total fatalities, injuries, and overall harm.
+event_harm_summary <- health_data %>%
+  group_by(EVENT_TYPE) %>%
+  summarise(
+    TOTAL_DEATHS = sum(DEATHS_DIRECT + DEATHS_INDIRECT, na.rm = TRUE),
+    TOTAL_INJURIES = sum(INJURIES_DIRECT + INJURIES_INDIRECT, na.rm = TRUE),
+    TOTAL_HARM = sum(TOTAL_HARM, na.rm = TRUE)
+  ) %>%
+  arrange(desc(TOTAL_HARM))
+
+# Plot the top 10 most harmful weather events.
+event_harm_summary %>%
+  slice_max(TOTAL_HARM, n = 10) %>%
+  ggplot(aes(x = reorder(EVENT_TYPE, TOTAL_HARM), y = TOTAL_HARM, fill = TOTAL_HARM)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = TOTAL_HARM), hjust = -0.1, size = 3.5, color = "black") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Most Harmful Weather Events (Population Health Impact)",
+    subtitle = "Based on total reported injuries and deaths",
+    x = "Event Type",
+    y = "Total Harm (Injuries + Deaths)"
+  ) +
+  theme_minimal(base_size = 12) +
+  expand_limits(y = max(event_harm_summary$TOTAL_HARM) * 1.1)
+```
+The analysis above highlights the top 10 storm event types in the U.S. during 2024 that resulted in the highest combined counts of direct/indirect deaths and injuries. Events such as tornadoes, excessive heat, and flash floods emerge as the most harmful in terms of total reported harm to population health. These event types show significantly elevated casualty totals relative to others in the dataset. The results are based on aggregated event-level injury and fatality data for all U.S. states and territories.
+
+
+### Question 2: Across the United States, which types of events most happening in which States?
+
+```{r q2-events-by-state, fig.width=12, fig.height=9}
+# Deduplicate to the event level to avoid counting duplicates.
+event_level_data <- health_data %>%
+  distinct(EVENT_ID, STATE, EVENT_TYPE, .keep_all = TRUE)
+
+# Count unique events per state and event type.
+event_counts_by_state <- event_level_data %>%
+  group_by(STATE, EVENT_TYPE) %>%
+  summarise(EVENT_COUNT = n(), .groups = "drop")
+
+# For each state, identify the most common event type.
+most_common_event_by_state <- event_counts_by_state %>%
+  group_by(STATE) %>%
+  slice_max(EVENT_COUNT, n = 1, with_ties = FALSE) %>%
+  arrange(STATE)
+
+# Plot the most frequent event per state.
+ggplot(most_common_event_by_state, aes(x = reorder(STATE, EVENT_COUNT), y = EVENT_COUNT)) +
+  geom_segment(aes(xend = STATE, y = 0, yend = EVENT_COUNT), color = "gray80") +
+  geom_point(aes(color = EVENT_TYPE), size = 4) +
+  coord_flip() +
+  labs(
+    title = "Most Common Weather Event by State (2024)",
+    subtitle = "Frequency of distinct storm events",
+    x = "State",
+    y = "Event Count",
+    color = "Event Type"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+This figure illustrates the most frequently recorded storm event type in each U.S. state during 2024. The majority of states reported Thunderstorm Wind as the most common hazard, highlighting its widespread occurrence across the country. However, some states had different dominant hazards—Texas experienced the highest number of Hail events, while New Mexico and Georgia were led by Drought and Heat, respectively. The differences in top event types reflect regional climatic patterns and hazard exposures. Each point represents the most common event type for a state, with the x-axis showing the corresponding number of distinct storm events.
+
+
+
+### Question 3: Which types of events are characterised by which months?
+
+```{r q3-monthly-seasonality, fig.width=14, fig.height=10}
+# Select the necessary columns for seasonal analysis.
+seasonal_data <- joined_data_cleaned %>%
+  select(EVENT_TYPE, MONTH_NAME) %>%
+  filter(!is.na(MONTH_NAME), !is.na(EVENT_TYPE))
+
+# Count the frequency of each event type by month.
+event_monthly_counts <- seasonal_data %>%
+  group_by(EVENT_TYPE, MONTH_NAME) %>%
+  summarise(EVENT_COUNT = n(), .groups = "drop")
+
+# Convert MONTH_NAME to an ordered factor from January to December.
+event_monthly_counts$MONTH_NAME <- factor(
+  event_monthly_counts$MONTH_NAME,
+  levels = month.name,
+  ordered = TRUE
+)
+
+# Plot a heatmap to show event frequency by month and event type.
+ggplot(event_monthly_counts, aes(x = MONTH_NAME, y = reorder(EVENT_TYPE, -EVENT_COUNT), fill = EVENT_COUNT)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(option = "C") +
+  labs(
+    title = "Seasonality of Weather Events (2024)",
+    subtitle = "Heatmap of event frequency by type and month",
+    x = "Month",
+    y = "Event Type",
+    fill = "Event Count"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+The seasonality heatmap reveals the monthly distribution of storm events by type throughout 2024. Clear temporal patterns emerge — for example, thunderstorm wind events cluster heavily in spring and summer months, while winter storms and ice storms are concentrated in colder months. This visualization helps illustrate the cyclical nature of various hazards over the calendar year, offering insight into when different event types tend to occur most often.
+
+
+### Question 4: Which Event Types Are Associated with the Greatest Economic Damage?
+
+```{r q4-economic-damage, fig.width=12, fig.height=7}
+# Define a function to convert damage strings (e.g., "10K", "1.5M") to numeric values.
+convert_damage <- function(damage) {
+  damage <- toupper(trimws(damage))
+  numeric_value <- as.numeric(gsub("[KMB]", "", damage))
+  multiplier <- case_when(
+    grepl("K", damage) ~ 1e3,
+    grepl("M", damage) ~ 1e6,
+    grepl("B", damage) ~ 1e9,
+    TRUE ~ 1
+  )
+  numeric_value * multiplier
+}
+
+# Select columns relevant to economic damage.
+economic_data <- joined_data_cleaned %>%
+  select(EVENT_TYPE, DAMAGE_PROPERTY, DAMAGE_CROPS) %>%
+  mutate(
+    PROP_DMG_NUM = ifelse(is.na(DAMAGE_PROPERTY), NA, convert_damage(DAMAGE_PROPERTY)),
+    CROP_DMG_NUM = ifelse(is.na(DAMAGE_CROPS), NA, convert_damage(DAMAGE_CROPS)),
+    TOTAL_ECONOMIC_DAMAGE = rowSums(cbind(PROP_DMG_NUM, CROP_DMG_NUM), na.rm = TRUE)
+  )
+
+# Summarize total economic damage by event type.
+economic_summary <- economic_data %>%
+  group_by(EVENT_TYPE) %>%
+  summarise(
+    TOTAL_PROPERTY_DAMAGE = sum(PROP_DMG_NUM, na.rm = TRUE),
+    TOTAL_CROP_DAMAGE = sum(CROP_DMG_NUM, na.rm = TRUE),
+    TOTAL_ECONOMIC_DAMAGE = sum(TOTAL_ECONOMIC_DAMAGE, na.rm = TRUE)
+  ) %>%
+  arrange(desc(TOTAL_ECONOMIC_DAMAGE))
+
+# Function to format dollar amounts for the labels.
+format_dollars <- function(x) {
+  ifelse(x >= 1e9,
+         dollar(x, scale = 1e-9, suffix = "B"),
+         dollar(x, scale = 1e-6, suffix = "M"))
+}
+
+# Plot the top 10 event types by economic damage.
+economic_summary %>%
+  slice_max(TOTAL_ECONOMIC_DAMAGE, n = 10) %>%
+  ggplot(aes(x = reorder(EVENT_TYPE, TOTAL_ECONOMIC_DAMAGE), y = TOTAL_ECONOMIC_DAMAGE, fill = TOTAL_ECONOMIC_DAMAGE)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = format_dollars(TOTAL_ECONOMIC_DAMAGE)), hjust = -0.1, size = 3.5, color = "black") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Weather Event Types by Economic Damage (2024)",
+    subtitle = "Combined property and crop damages",
+    x = "Event Type",
+    y = "Total Economic Damage (USD)"
+  ) +
+  scale_fill_gradient(low = "#FFECB3", high = "#BF360C") +
+  scale_y_continuous(labels = format_dollars) +
+  theme_minimal(base_size = 13) +
+  expand_limits(y = max(economic_summary$TOTAL_ECONOMIC_DAMAGE) * 1.12)
+```
+This bar chart summarizes the total reported property and crop damage for each event type. Events like hurricanes, floods, and hail caused the most substantial economic losses in 2024, often measured in billions of dollars. The financial impact was derived from NOAA’s reported figures using standardized conversion (e.g., “K” = thousand, “M” = million). These results quantify the relative economic burden associated with each hazard.
+
+## Conclusion
+
+This analysis of the 2024 NOAA Storm Events dataset provides a comprehensive overview of storm-related impacts across the United States. By integrating data from event details, locations, and fatalities, we examined the most harmful event types to population health, identified state-specific frequency patterns, uncovered seasonal trends, and quantified the economic consequences of severe weather.
+
+The findings reveal clear geographic and temporal variability in how different hazards manifest, with events like tornadoes, heat, hail, and thunderstorm winds recurring prominently across multiple dimensions of impact. These insights may support future situational awareness efforts by municipal and emergency management professionals.
+
+All results were generated through reproducible code applied to the raw NOAA files, ensuring transparency and traceability of every analytical step.
